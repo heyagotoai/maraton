@@ -1,0 +1,7 @@
+.env
+/catboost_info
+/data
+/models
+/testy
+appnotebook.py
+logs.log
