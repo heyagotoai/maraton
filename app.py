@@ -5,6 +5,15 @@ from datetime import datetime, timedelta
 import re
 import joblib
 import os
+import boto3
+
+# Klient s3
+s3 = boto3.client('s3')
+# Nazwa kontenera w Digital Ocean
+BUCKET_NAME='maraton'
+# Wczytaj model z s3
+model_from_s3 = s3.get_object(Bucket=BUCKET_NAME, Key='models/maraton_pipeline.pkl')
+model_from_s3 = joblib.load(model_from_s3['Body'])
 
 # Konfiguracja strony
 st.set_page_config(
@@ -22,7 +31,7 @@ def load_model():
     """
     try:
         # Ścieżka do modelu
-        model_path = 'models/maraton_pipeline.pkl'
+        model_path = model_from_s3
         
         # Sprawdzenie czy plik istnieje
         if not os.path.exists(model_path):
