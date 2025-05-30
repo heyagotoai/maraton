@@ -46,4 +46,4 @@ streamlit run apptest.py
 
 - Model został wytrenowany na rzeczywistych danych z półmaratonów
 - Przewidywania są orientacyjne
-- Najlepsze wyniki dla regularnie trenujących biegaczy 
+- Najlepsze wyniki dla regularnie trenujących biegaczy
