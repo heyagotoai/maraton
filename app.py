@@ -6,14 +6,7 @@ import re
 import joblib
 import os
 import boto3
-
-# Klient s3
-s3 = boto3.client('s3')
-# Nazwa kontenera w Digital Ocean
-BUCKET_NAME='maraton'
-# Wczytaj model z s3
-model_from_s3 = s3.get_object(Bucket=BUCKET_NAME, Key='models/maraton_pipeline.pkl')
-model_from_s3 = joblib.load(model_from_s3['Body'])
+import io
 
 # Konfiguracja strony
 st.set_page_config(
@@ -27,25 +20,45 @@ st.set_page_config(
 @st.cache_resource
 def load_model():
     """
-    Załadowanie wytrenowanego modelu półmaratonu
+    Załadowanie wytrenowanego modelu półmaratonu z S3
     """
     try:
-        # Ścieżka do modelu
-        model_path = model_from_s3
+        # Konfiguracja S3
+        s3 = boto3.client('s3')
+        BUCKET_NAME = 'maraton'
         
-        # Sprawdzenie czy plik istnieje
-        if not os.path.exists(model_path):
-            st.error(f"❌ Nie znaleziono pliku modelu: {model_path}")
-            return None
-            
-        # Załadowanie modelu
-        model = joblib.load(model_path)
-        st.success("✅ Model został pomyślnie załadowany!")
+        # Pobierz model z S3
+        st.info("🔄 Ładowanie modelu z S3...")
+        response = s3.get_object(Bucket=BUCKET_NAME, Key='models/maraton_pipeline.pkl')
+        
+        # Odczytaj zawartość do pamięci
+        model_data = response['Body'].read()
+        
+        # Załaduj model z danych binarnych
+        model = joblib.load(io.BytesIO(model_data))
+        
+        st.success("✅ Model został pomyślnie załadowany z S3!")
         return model
         
     except Exception as e:
-        st.error(f"❌ Błąd podczas ładowania modelu: {str(e)}")
-        return None
+        st.error(f"❌ Błąd podczas ładowania modelu z S3: {str(e)}")
+        
+        # Fallback - spróbuj załadować lokalny model
+        try:
+            st.info("🔄 Próba załadowania lokalnego modelu...")
+            local_model_path = 'models/maraton_pipeline.pkl'
+            
+            if os.path.exists(local_model_path):
+                model = joblib.load(local_model_path)
+                st.success("✅ Model został załadowany lokalnie!")
+                return model
+            else:
+                st.error(f"❌ Nie znaleziono lokalnego pliku modelu: {local_model_path}")
+                return None
+                
+        except Exception as local_error:
+            st.error(f"❌ Błąd podczas ładowania lokalnego modelu: {str(local_error)}")
+            return None
 
 # Zmiana czasu uzyskanego przez zawodników z formatu h:m:s, na sekundy
 def convert_time_to_seconds(time):

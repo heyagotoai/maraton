@@ -1,6 +1,8 @@
 .env
 /catboost_info
 /testy
+/models
+/data
 appnotebook.py
 logs.log
 appV1.py
