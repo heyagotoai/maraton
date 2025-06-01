@@ -192,18 +192,34 @@ def main():
                     st.error(f"❌ {error}")
             else:
                 try:
-                    # Kodowanie płci (zgodnie z danymi treningowymi: 0 - kobieta, 1 - mężczyzna)
-                    plec_encoded = 1 if plec_wybor == "Mężczyzna" else 0
+                    # Kodowanie płci (zgodnie z danymi treningowymi: 1 - kobieta, 0 - mężczyzna)
+                    plec_encoded = 1 if plec_wybor == "Kobieta" else 0
                     
                     # Obliczenie tempa na kilometr dla 5km (w sekundach na kilometr)
                     tempo_5km = czas_5km_sekundy / 5 / 60  # tempo na kilometr w minutach
+
+                    # Obliczanie współczynnika wieku na tempo
+                    wiek_tempo = wiek/tempo_5km
+
+                    # Obliczanie czasu na 5km dla kobiet i mężczyzn
+                    czas_5km_k = czas_5km_sekundy if plec_encoded == 1 else 0
+                    czas_5km_m = czas_5km_sekundy if plec_encoded == 0 else 1
+
+                    # Obliczanie tempa na kilometr dla 5km dla kobiet i mężczyzn
+                    tempo_5km_k = czas_5km_k / 5 / 60
+                    tempo_5km_m = czas_5km_m / 5 / 60
                                         
                     # Przygotowanie danych do predykcji (zgodnie ze strukturą z demo_halfmarathon_data.csv)
                     user_data = pd.DataFrame({
                         'Wiek': [wiek],
                         'Płeć': [plec_encoded],
                         '5 km Czas': [czas_5km_sekundy], #model oczekuje sekund
-                        '5 km Tempo': [tempo_5km] # tempo na kilometr w minutach
+                        '5 km Tempo': [tempo_5km], # tempo na kilometr w minutach
+                        'WiekTempo': [wiek_tempo], # tempo na kilometr w minutach
+                        '5 km Czas K': [czas_5km_k], # czas w sekundach dla kobiet
+                        '5 km Czas M': [czas_5km_m], # czas w sekundach dla mężczyzn
+                        '5 km Tempo K': [tempo_5km], # tempo na kilometr w minutach
+                        '5 km Tempo M': [tempo_5km], # tempo na kilometr w minutach
                     })
                     
                     # Przewidywanie (model zwraca czas w sekundach)

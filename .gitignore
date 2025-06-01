@@ -1,6 +1,5 @@
 .env
 /catboost_info
-/testy
 /models
 /data
 appnotebook.py
