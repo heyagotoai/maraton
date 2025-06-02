@@ -199,7 +199,7 @@ def main():
                     tempo_5km = czas_5km_sekundy / 5 / 60  # tempo na kilometr w minutach
 
                     # Obliczanie współczynnika wieku na tempo
-                    wiek_tempo = wiek/tempo_5km
+                    wiek_tempo = tempo_5km/wiek
 
                     # Obliczanie czasu na 5km dla kobiet i mężczyzn
                     czas_5km_k = czas_5km_sekundy if plec_encoded == 1 else 0
