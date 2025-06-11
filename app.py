@@ -1,33 +1,37 @@
+#%%
 import streamlit as st
 import pandas as pd
 import re
 import joblib
+import json
 import os
 import boto3
 import io
 import openai
 from dotenv import load_dotenv
+from langfuse import Langfuse, observe
+from langfuse.openai import OpenAI as LangfuseOpenAI
+from langfuse import Langfuse
 
 load_dotenv(".env")
 
 # Konfiguracja strony
 st.set_page_config(
-    page_title="Przewidywanie czasu półmaratonu",
+    page_title="Twój czasu półmaratonu",
     page_icon="🏃‍♂️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 
-# Funkcja do wyciągania danych z tekstu za pomocą LLM
+# Funkcja do wyciągania danych z tekstu za pomocą LLM, z obserwacją
 def wyciagnij_dane_z_tekstu(opis_uzytkownika):
     """
     Wyciąga dane treningowe z swobodnego tekstu użytkownika za pomocą LLM
     """
-    client = openai.OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
+    llm_client = LangfuseOpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY")
     )
-
 
        
     # Prompt do analizy tekstu
@@ -38,66 +42,86 @@ def wyciagnij_dane_z_tekstu(opis_uzytkownika):
     3. Płeć (Kobieta lub Mężczyzna)
     4. Czas na 5km (w formacie MM:SS)
     
-    Odpowiedz w dokładnie takim formacie:
-    Imię: [imię lub Brak]
-    Wiek: [liczba]
-    Płeć: [Kobieta/Mężczyzna]  
-    Czas na 5km: [MM:SS]
+    Odpowiedz w formacie JSON z następującymi kluczami:
+    {
+        "Imię": "[imię lub Brak]",
+        "Wiek": "[liczba]",
+        "Płeć": "[Kobieta/Mężczyzna]",
+        "Czas na 5km": "[MM:SS]"
+    }
     """
 
     # NIE koduj/dekoduj tekstu, po prostu użyj go bezpośrednio
     user_prompt = f"Przeanalizuj ten tekst i wyciągnij dane treningowe: {opis_uzytkownika}"
 
     # Wywołanie OpenAI API
-    response = client.chat.completions.create(
+    response = llm_client.chat.completions.create(
+        response_format={"type": "json_object"},
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
         temperature=0.1,
-        max_tokens=200
+        max_tokens=200,
+        name="wyciagnij_dane_z_tekstu"
     )
 
     dane_z_tekstu = response.choices[0].message.content.strip()
+    try:
+        dane_z_tekstu = json.loads(dane_z_tekstu)
+    except:
+        dane_z_tekstu = {"error": dane_z_tekstu}
     return dane_z_tekstu
 
-def parsuj_dane_z_ai(tekst_ai):
+@observe(name="parsuj_dane_z_ai")
+def parsuj_dane_z_ai(dane_json):
     """
-    Parsuje odpowiedź z AI i wyciąga konkretne wartości
+    Parsuje odpowiedź JSON z AI i wyciąga konkretne wartości
     """
     try:
-        lines = tekst_ai.strip().split('\n')
-        dane = {}
-        
-        for line in lines:
-            if 'Imię:' in line:
-                imie_str = line.split('Imię:')[1].strip()
+        # dane_json jest już słownikiem, nie trzeba go parsować
+        if isinstance(dane_json, dict):
+            dane = {}
+            
+            # Parsowanie imienia
+            if 'Imię' in dane_json:
+                imie_str = dane_json['Imię'].strip()
                 if imie_str != 'Brak' and imie_str.lower() != 'brak':
                     dane['imie'] = imie_str
-            elif 'Wiek:' in line:
-                wiek_str = line.split('Wiek:')[1].strip()
+            
+            # Parsowanie wieku
+            if 'Wiek' in dane_json:
+                wiek_str = str(dane_json['Wiek']).strip()
                 if wiek_str != 'Brak' and wiek_str.lower() != 'brak':
                     # Bezpieczne wyciąganie liczby z tekstu
                     liczby = re.findall(r'\d+', wiek_str)
                     if liczby:
                         dane['wiek'] = int(liczby[0])
-            elif 'Płeć:' in line:
-                plec_str = line.split('Płeć:')[1].strip()
+            
+            # Parsowanie płci
+            if 'Płeć' in dane_json:
+                plec_str = dane_json['Płeć'].strip()
                 if plec_str != 'Brak' and plec_str.lower() != 'brak':
                     if 'Kobieta' in plec_str or 'kobieta' in plec_str:
                         dane['plec'] = 'Kobieta'
                     elif 'Mężczyzna' in plec_str or 'mężczyzna' in plec_str:
                         dane['plec'] = 'Mężczyzna'
-            elif 'Czas na 5km:' in line:
-                czas_str = line.split('Czas na 5km:')[1].strip()
+            
+            # Parsowanie czasu na 5km
+            if 'Czas na 5km' in dane_json:
+                czas_str = dane_json['Czas na 5km'].strip()
                 if czas_str != 'Brak' and czas_str.lower() != 'brak':
                     # Wyciągnij format MM:SS używając regex
                     match = re.search(r'(\d{1,2}):(\d{2})', czas_str)
                     if match:
                         dane['czas_5km'] = f"{match.group(1)}:{match.group(2)}"
-        
-        return dane
+            
+            return dane
+        else:
+            st.error("Nieprawidłowy format odpowiedzi z AI")
+            return None
+            
     except Exception as e:
         st.error(f"Błąd podczas parsowania danych z AI: {str(e)}")
         return None
@@ -114,7 +138,7 @@ def load_model():
         BUCKET_NAME = 'maraton'
         
         # Pobierz model z S3
-        st.info("🔄 Ładowanie modelu z S3...")
+        st.write("🔄 Ładowanie modelu z S3")
         response = s3.get_object(Bucket=BUCKET_NAME, Key='models/maraton_pipeline.pkl')
         
         # Odczytaj zawartość do pamięci
@@ -123,7 +147,7 @@ def load_model():
         # Załaduj model z danych binarnych
         model = joblib.load(io.BytesIO(model_data))
         
-        st.success("✅ Model został pomyślnie załadowany z S3!")
+        st.write("✅ Model został pomyślnie załadowany z S3!")
         return model
         
     except Exception as e:
@@ -232,6 +256,7 @@ def obliczenia(czas_5km_sekundy, wiek, plec_wybor):
     })
     return dane_do_predykcji
 
+@observe(name="predykcja_czasu_półmaratonu")
 def predykcja(dane_do_predykcji, model, imie=None):
     # Przewidywanie (model zwraca czas w sekundach)
     przewidywany_czas_sekundy = model.predict(dane_do_predykcji)[0]
@@ -242,45 +267,22 @@ def predykcja(dane_do_predykcji, model, imie=None):
     
     # Spersonalizowane powitanie
     if imie:
-        powitanie = f"🎉 **{imie}**, Twój przewidywany czas półmaratonu: **{przewidywany_czas_formatted}**"
+        powitanie = f"🎉 **{imie}**, Twój czas półmaratonu: **{przewidywany_czas_formatted}**"
     else:
         powitanie = f"🎉 Przewidywany czas półmaratonu: **{przewidywany_czas_formatted}**"
     
     # Wyświetlenie wyniku
-    st.success(powitanie)
-    
-    # Dodatkowe informacje
-    col_tempo, col_info = st.columns(2)
-    
-    with col_tempo:
-        st.info(f"⏱️ **Tempo na kilometr:** {tempo} min/km")
-    
-    with col_info:
-        # Klasyfikacja wyniku
-        if przewidywany_czas_sekundy < 90*60:  # < 1:30:00
-            kategoria = "Świetny czas!"
-            color = "🥇"
-        elif przewidywany_czas_sekundy < 105*60:  # < 1:45:00
-            kategoria = "Bardzo dobry czas!"
-            color = "🥈"
-        elif przewidywany_czas_sekundy < 120*60:  # < 2:00:00
-            kategoria = "Dobry czas!"
-            color = "🥉"
-        else:
-            kategoria = "Kontynuuj treningi!"
-            color = "💪"
-        
-        st.info(f"{color} **{kategoria}**")
+    st.markdown(f"## {powitanie} ##")
     
     # Dodatkowe statystyki
-    st.markdown("### 📈 Dodatkowe informacje")
+    st.markdown("### 📈 Twoje statystyki")
     col_stat1, col_stat2, col_stat3 = st.columns(3)
     
     with col_stat1:
         st.metric(
-            label="Czas półmaratonu",
-            value=przewidywany_czas_formatted
-        )
+        label="Tempo na kilometr",
+        value=tempo
+    )
     
     with col_stat2:
         srednia_predkosc = 21.0975 / (przewidywany_czas_sekundy / 3600)  # km/h
@@ -296,23 +298,25 @@ def predykcja(dane_do_predykcji, model, imie=None):
             value=f"{przewidywany_czas_minuty:.1f} min"
         )
     
-    # Spersonalizowane porady treningowe
-    st.markdown("### 💡 Porady treningowe")
-    
-    # Podstawa porad
-    if tempo.split(':')[0] == '04':  # tempo 4:xx
-        podstawowa_porada = "🚀 Fantastyczne tempo! Kontynuuj intensywne treningi i pracuj nad wytrzymałością."
-    elif tempo.split(':')[0] == '05':  # tempo 5:xx
-        podstawowa_porada = "👍 Dobre tempo! Dodaj więcej długich biegów i pracuj nad równomiernym tempem."
-    else:  # tempo 6:xx i wolniejsze
-        podstawowa_porada = "💪 Pracuj nad poprawą tempa poprzez treningi interwałowe i stopniowe zwiększanie dystansu."
-    
-    # Spersonalizowana porada
-    if imie:
-        spersonalizowana_porada = f"**{imie}**, {podstawowa_porada.lower()}"
-        st.info(spersonalizowana_porada)
+    st.markdown("")
+    # Klasyfikacja wyniku
+    if przewidywany_czas_sekundy < 90*60:  # < 1:30:00
+        kategoria = "Świetny czas!"
+        color = "🥇"
+    elif przewidywany_czas_sekundy < 105*60:  # < 1:45:00
+        kategoria = "Bardzo dobry czas!"
+        color = "🥈"
+    elif przewidywany_czas_sekundy < 120*60:  # < 2:00:00
+        kategoria = "Dobry czas!"
+        color = "🥉"
     else:
-        st.info(podstawowa_porada)
+        kategoria = "Kontynuuj treningi!"
+        color = "💪"
+    
+    st.metric(
+        label="Kategoria",
+        value=f"{color} **{kategoria}**"
+    )
     
     # AI-generowane podsumowanie motywujące
     st.markdown("### 🤖 Spersonalizowane podsumowanie AI")
@@ -341,6 +345,7 @@ def predykcja(dane_do_predykcji, model, imie=None):
         </div>
         """, unsafe_allow_html=True)
 
+@observe(name="generuj_motywujace_podsumowanie_ai")
 def generuj_motywujace_podsumowanie_ai(wiek, plec, czas_5km, przewidywany_czas, imie=None):
     """
     Generuje spersonalizowane, motywujące podsumowanie z sugestiami treningowymi
@@ -492,7 +497,92 @@ def generuj_prosbe_o_brakujace_dane(brakujace_dane, dane_z_ai, imie=None):
         **Przykład:** "Mam 30 lat, jestem kobietą i mój czas na 5km to 25:30"
         
         Uzupełnij brakujące informacje i spróbuj ponownie! 😊
-        """
+
+                """
+# Funkcja do logowania danych użytkownika i wyników predykcji do Langfuse
+@observe(name="log_predykcji_uzytkownika")
+def log_to_langfuse(dane_uzytkownika, wyniki_predykcji, wskazowki, dane_dla_ai=None):
+    """
+    Loguje dane użytkownika i wyniki predykcji do Langfuse dataset
+    """
+    try:
+        # Inicjalizacja klienta Langfuse
+        langfuse = Langfuse(
+            secret_key=os.environ.get("LANGFUSE_SECRET_KEY"),
+            public_key=os.environ.get("LANGFUSE_PUBLIC_KEY"),
+            host=os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+        )
+        
+        # Przygotowanie danych wejściowych (input)
+        input_data = {
+            "imie": dane_uzytkownika.get("imie", "Brak"),
+            "wiek": dane_uzytkownika.get("wiek", None),
+            "plec": dane_uzytkownika.get("plec", None),
+            "czas_5km": dane_uzytkownika.get("czas_5km", None),
+            "opis_uzytkownika": dane_uzytkownika.get("opis_oryginalny", "")
+        }
+        
+        # Generowanie podsumowania AI jeśli dane są dostępne
+        podsumowanie_ai = None
+        if dane_dla_ai:
+            try:
+                podsumowanie_ai = generuj_motywujace_podsumowanie_ai(
+                    dane_dla_ai['wiek'],
+                    dane_dla_ai['plec'],
+                    dane_dla_ai['czas_5km_sekundy'],
+                    dane_dla_ai['przewidywany_czas_sekundy'],
+                    dane_dla_ai.get('imie', None)
+                )
+            except Exception as e:
+                print(f"Błąd generowania podsumowania AI: {str(e)}")
+                podsumowanie_ai = "Nie udało się wygenerować spersonalizowanego podsumowania."
+        
+        # Przygotowanie danych wyjściowych (expected output)
+        output_data = {
+            "przewidywany_czas_polmaraton": wyniki_predykcji.get("czas_formatted", None),
+            "tempo_na_km": wyniki_predykcji.get("tempo", None),
+            "srednia_predkosc": wyniki_predykcji.get("predkosc", None),
+            "wskazowki_treningowe": wskazowki,
+            "timestamp": pd.Timestamp.now().isoformat()
+        }
+        
+        # Dodaj podsumowanie AI jeśli zostało wygenerowane
+        if podsumowanie_ai:
+            output_data["podsumowanie_ai"] = podsumowanie_ai
+        
+        # Dodanie danych do dataset
+        dataset_name = "halfmaraton"
+        
+        # Utworzenie lub pobranie dataset
+        try:
+            dataset = langfuse.get_dataset(dataset_name)
+        except:
+            # Dataset nie istnieje, utwórz nowy
+            dataset = langfuse.create_dataset(
+                name=dataset_name,
+                description="Dataset z przewidywaniami czasu półmaratonu użytkowników"
+            )
+        
+        # Dodanie item do dataset
+        dataset_item = langfuse.create_dataset_item(
+            dataset_name=dataset_name,
+            input=input_data,
+            expected_output=output_data,
+            metadata={
+                "model_version": "v1.0",
+                "app_version": "streamlit_app",
+                "data_source": "user_input_ai_analysis"
+            }
+        )
+        
+        return dataset_item
+        
+    except Exception as e:
+        # Nie przerywamy działania aplikacji jeśli logowanie się nie powiedzie
+        print(f"❌ Błąd logowania do Langfuse: {str(e)}")
+        import traceback
+        print(f"🔍 Pełny stack trace: {traceback.format_exc()}")
+        return None
 
 # Główna aplikacja
 def main():
@@ -500,10 +590,7 @@ def main():
     # Tytuł i opis aplikacji
     st.title("🏃‍♂️ Przewidywanie czasu półmaratonu")
     st.markdown("""
-    ### Przewiduj swój czas na półmaraton na podstawie danych treningowych
-    
-    Ta aplikacja wykorzystuje model uczenia maszynowego do przewidywania czasu półmaratonu 
-    na podstawie Twojego wieku, płci i czasu na 5km.
+    ### Sprawdź swój czas półmaratonu na podstawie danych historycznych zawodników Półmaratonu Wrocławskiego 2023-2024
     """)
     
     # Załadowanie modelu
@@ -516,70 +603,71 @@ def main():
     # Tworzenie layoutu kolumn
     col1, col2 = st.columns([2, 3])
     
-    # with col1:
-    #     st.markdown("### 📋 Wprowadź swoje dane")
-        
-    #     # Formularz do wprowadzenia danych
-    #     with st.form("prediction_form"):
-    #         # Wiek
-    #         wiek = st.number_input(
-    #             "Wiek (lata)",
-    #             min_value=18,
-    #             max_value=80,
-    #             value=30,
-    #             step=1,
-    #             help="Wprowadź swój wiek w latach (18-80)"
-    #         )
-            
-    #         # Płeć
-    #         plec_wybor = st.selectbox(
-    #             "Płeć",
-    #             options=["Kobieta", "Mężczyzna"],
-    #             help="Wybierz swoją płeć"
-    #         )
-            
-    #         # Czas na 5km
-    #         czas_5km = st.text_input(
-    #             "Czas na 5km (MM:SS)",
-    #             placeholder="np. 25:30",
-    #             help="Wprowadź swój czas na 5km w formacie MM:SS"
-    #         )
-            
-    #         # Przycisk przewidywania
-    #         przewiduj = st.form_submit_button(
-    #             "🎯 Przewiduj czas półmaratonu",
-    #             use_container_width=True
-    #         )
     with col1:
-        st.markdown("### 💬 Opowiedz o sobie")
+            st.markdown("### 💬 Opowiedz o sobie")
 
-        # Formularz do wprowadzenia tekstu
-        with st.form("user_text_form"):
-            opis_uzytkownika = st.text_area(
-                "Podaj swoje imię, wiek, płeć i czas na 5km",
-                height=300,
-                placeholder="Np. Nazywam się Anna, mam 30 lat, jestem kobietą i mój czas na 5km to 25:30"
-            )
-            
-            analizuj = st.form_submit_button(
-                "🤖 Analizuj tekst i przewiduj",
-                use_container_width=True
-            )
+            # Formularz do wprowadzenia tekstu
+            with st.form("user_text_form"):
+                opis_uzytkownika = st.text_area(
+                    "Potrzebuję Twoje imię, wiek, płeć i przybliżony czas na 5km",
+                    height=300,
+                    placeholder="Np. Nazywam się Anna, mam 30 lat, jestem kobietą i mój czas na 5km to 25:30"
+                )
+                
+                analizuj = st.form_submit_button(
+                    "🤖 Analizuj tekst i przewiduj",
+                    use_container_width=True
+                )
+
+            # Wyświetlanie rozpoznanych danych pod formularzem
+            if analizuj:
+                # Analiza tekstu przez AI
+                dane_z_ai_json = wyciagnij_dane_z_tekstu(opis_uzytkownika)
+                
+                # Wyświetlanie danych w czytelnej formie
+                st.markdown("### 📋 Rozpoznane dane:")
+                
+                # Tworzenie czytelnego podsumowania danych
+                if isinstance(dane_z_ai_json, dict):
+                    col_a, col_b = st.columns(2)
+                    
+                    with col_a:
+                        if 'Imię' in dane_z_ai_json and dane_z_ai_json['Imię'] != 'Brak':
+                            st.info(f"👤 **Imię:** {dane_z_ai_json['Imię']}")
+                        else:
+                            st.warning("👤 **Imię:** nie podano")
+                        
+                        if 'Wiek' in dane_z_ai_json:
+                            st.info(f"🎂 **Wiek:** {dane_z_ai_json['Wiek']} lat")
+                        else:
+                            st.warning("🎂 **Wiek:** nie rozpoznano")
+                    
+                    with col_b:
+                        if 'Płeć' in dane_z_ai_json:
+                            icon = "👩" if dane_z_ai_json['Płeć'] == 'Kobieta' else "👨"
+                            st.info(f"{icon} **Płeć:** {dane_z_ai_json['Płeć']}")
+                        else:
+                            st.warning("⚧️ **Płeć:** nie rozpoznano")
+                        
+                        if 'Czas na 5km' in dane_z_ai_json:
+                            st.info(f"🏃‍♂️ **Czas na 5km:** {dane_z_ai_json['Czas na 5km']}")
+                        else:
+                            st.warning("⏱️ **Czas na 5km:** nie rozpoznano")
+                else:
+                    st.error("❌ Nie udało się rozpoznać danych z tekstu")
+                    st.write("Odpowiedź AI:", dane_z_ai_json)
 
     with col2:
-        st.markdown("### 📊 Wyniki przewidywania")
-        
+                    
         # Zmienna do śledzenia czy wyświetlono jakiekolwiek wyniki
         wyswietlono_wyniki = False
         
         if analizuj:
-            # Analiza tekstu przez AI
-            dane_z_ai_tekst = wyciagnij_dane_z_tekstu(opis_uzytkownika)
-            st.write("**Twoje dane:**")
-            st.write(dane_z_ai_tekst)
+            # Analiza tekstu przez AI (przeniesione do lewej kolumny)
+            dane_z_ai_json = wyciagnij_dane_z_tekstu(opis_uzytkownika)
             
             # Parsowanie danych z AI
-            dane_z_ai = parsuj_dane_z_ai(dane_z_ai_tekst)
+            dane_z_ai = parsuj_dane_z_ai(dane_z_ai_json)
             
             if dane_z_ai is None:
                 st.error("❌ Nie udało się wyciągnąć danych z tekstu. Spróbuj ponownie.")
@@ -631,6 +719,50 @@ def main():
                         # Wszystkie dane są dostępne - wykonaj predykcję
                         dane_do_predykcji = obliczenia(czas_5km_sekundy, dane_z_ai['wiek'], dane_z_ai['plec'])
                         
+                        # Obliczenie wyników predykcji dla logowania
+                        przewidywany_czas_sekundy = model.predict(dane_do_predykcji)[0]
+                        przewidywany_czas_formatted = seconds_to_time(przewidywany_czas_sekundy)
+                        tempo = calculate_pace(przewidywany_czas_sekundy)
+                        srednia_predkosc = 21.0975 / (przewidywany_czas_sekundy / 3600)
+                        
+                        # Przygotowanie danych do logowania
+                        wyniki_predykcji = {
+                            "czas_formatted": przewidywany_czas_formatted,
+                            "tempo": tempo,
+                            "predkosc": f"{srednia_predkosc:.1f} km/h"
+                        }
+                        
+                        # Generowanie wskazówek
+                        if tempo.split(':')[0] == '04':  # tempo 4:xx
+                            wskazowki = "Fantastyczne tempo! Kontynuuj intensywne treningi i pracuj nad wytrzymałością."
+                        elif tempo.split(':')[0] == '05':  # tempo 5:xx
+                            wskazowki = "Dobre tempo! Dodaj więcej długich biegów i pracuj nad równomiernym tempem."
+                        else:  # tempo 6:xx i wolniejsze
+                            wskazowki = "Pracuj nad poprawą tempa poprzez treningi interwałowe i stopniowe zwiększanie dystansu."
+                        
+                        # Dodanie oryginalnego opisu do danych użytkownika dla logowania
+                        dane_z_ai['opis_oryginalny'] = opis_uzytkownika
+                        
+                        # Przygotowanie danych dla podsumowania AI
+                        dane_dla_ai = {
+                            'wiek': dane_z_ai['wiek'],
+                            'plec': dane_z_ai['plec'],
+                            'czas_5km_sekundy': czas_5km_sekundy,
+                            'przewidywany_czas_sekundy': przewidywany_czas_sekundy,
+                            'imie': dane_z_ai.get('imie', None)
+                        }
+                        
+                        # Logowanie do Langfuse
+                        try:
+                            logged_data = log_to_langfuse(dane_z_ai, wyniki_predykcji, wskazowki, dane_dla_ai)
+                            if logged_data:
+                                st.write("✅ Dane zostały zapisane do Langfuse!")
+                            else:
+                                st.warning("⚠️ Wystąpił problem z zapisem do Langfuse - sprawdź logi.")
+                        except Exception as e:
+                            st.error(f"❌ Błąd podczas logowania do Langfuse: {str(e)}")
+                            print(f"🔍 Szczegóły błędu Langfuse: {str(e)}")
+                        
                         # Wykonanie predykcji z imieniem (jeśli zostało podane)
                         imie_uzytkownika = dane_z_ai.get('imie', None)
                         predykcja(dane_do_predykcji, model, imie_uzytkownika)
@@ -640,36 +772,6 @@ def main():
                         st.error(f"❌ Wystąpił błąd podczas przewidywania: {str(e)}")
                         st.error("Sprawdź czy format danych jest poprawny i spróbuj ponownie.")
 
-        # if przewiduj:
-        #     # Walidacja danych
-        #     errors = []
-            
-        #     # Sprawdzenie wieku
-        #     if not (18 <= wiek <= 80):
-        #         errors.append("Wiek musi być w zakresie 18-80 lat")
-            
-        #     # Sprawdzenie czasu 5km
-        #     czas_5km_sekundy = sprawdz_format_czasu(czas_5km)
-        #     if czas_5km_sekundy is None:
-        #         errors.append("Nieprawidłowy format czasu 5km. Użyj formatu MM:SS (np. 25:30) i upewnij się, że podany czas mieści się w przedziale 12:00-59:59")
-            
-        #     # Wyświetlenie błędów lub przewidywania
-        #     if errors:
-        #         for error in errors:
-        #             st.error(f"❌ {error}")
-        #     else:
-        #         try:
-        #             # Przygotowanie danych do predykcji
-        #             dane_do_predykcji = obliczenia(czas_5km_sekundy, wiek, plec_wybor)
-                    
-        #             # Wykonanie predykcji
-        #             predykcja(dane_do_predykcji, model)
-        #             wyswietlono_wyniki = True
-
-        #         except Exception as e:
-        #             st.error(f"❌ Wystąpił błąd podczas przewidywania: {str(e)}")
-        #             st.error("Sprawdź czy format danych jest poprawny i spróbuj ponownie.")
-        
         # Wyświetl komunikat pomocniczy tylko jeśli nie wyświetlono żadnych wyników
         if not wyswietlono_wyniki and not analizuj: #and not przewiduj:
             st.info("👈Wprowadź swoje dane i kliknij przycisk przewidywania")
@@ -696,3 +798,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# %%
