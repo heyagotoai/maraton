@@ -653,6 +653,9 @@ def main():
                             st.info(f"🏃‍♂️ **Czas na 5km:** {dane_z_ai_json['Czas na 5km']}")
                         else:
                             st.warning("⏱️ **Czas na 5km:** nie rozpoznano")
+                    
+                    if st.button("🔄 Wyczyść dane i wykonaj analizę ponownie"):
+                        st.rerun()
                 else:
                     st.error("❌ Nie udało się rozpoznać danych z tekstu")
                     st.write("Odpowiedź AI:", dane_z_ai_json)
