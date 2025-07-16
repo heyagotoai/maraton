@@ -8,6 +8,7 @@ import os
 import boto3
 import io
 import openai
+from supabase import create_client, Client  # Dodano import Supabase
 from dotenv import load_dotenv
 from langfuse import Langfuse, observe
 from langfuse.openai import OpenAI as LangfuseOpenAI
@@ -63,15 +64,18 @@ def wyciagnij_dane_z_tekstu(opis_uzytkownika):
             {"role": "user", "content": user_prompt}
         ],
         temperature=0.1,
-        max_tokens=200,
-        name="wyciagnij_dane_z_tekstu"
+        max_tokens=200
     )
 
-    dane_z_tekstu = response.choices[0].message.content.strip()
-    try:
-        dane_z_tekstu = json.loads(dane_z_tekstu)
-    except:
-        dane_z_tekstu = {"error": dane_z_tekstu}
+    dane_z_tekstu = response.choices[0].message.content
+    if dane_z_tekstu:
+        dane_z_tekstu = dane_z_tekstu.strip()
+        try:
+            dane_z_tekstu = json.loads(dane_z_tekstu)
+        except:
+            dane_z_tekstu = {"error": dane_z_tekstu}
+    else:
+        dane_z_tekstu = {"error": "Brak odpowiedzi z AI"}
     return dane_z_tekstu
 
 @observe(name="parsuj_dane_z_ai")
@@ -132,13 +136,16 @@ def load_model():
     """
     Załadowanie wytrenowanego modelu półmaratonu z S3
     """
+    # Będziemy zbierać komunikaty o błędach z poszczególnych źródeł
+    error_messages = []
+
     try:
         # Konfiguracja S3
         s3 = boto3.client('s3')
         BUCKET_NAME = 'maraton'
         
         # Pobierz model z S3
-        st.write("🔄 Ładowanie modelu z S3")
+        #st.write("🔄 Ładowanie modelu z S3")
         response = s3.get_object(Bucket=BUCKET_NAME, Key='models/maraton_pipeline.pkl')
         
         # Odczytaj zawartość do pamięci
@@ -151,24 +158,56 @@ def load_model():
         return model
         
     except Exception as e:
-        st.error(f"❌ Błąd podczas ładowania modelu z S3: {str(e)}")
+        error_messages.append(f"S3: {str(e)}")
         
-        # Fallback - spróbuj załadować lokalny model
+        # Fallback 1 – spróbuj załadować model z Supabase Storage
         try:
-            st.info("🔄 Próba załadowania lokalnego modelu...")
+            SUPABASE_URL = os.getenv("SUPABASE_URL")
+            SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+            if SUPABASE_URL and SUPABASE_KEY:
+                supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+                # Domyślne wartości można nadpisać zmiennymi środowiskowymi
+                SUPABASE_BUCKET_NAME = os.getenv("SUPABASE_BUCKET_NAME")
+                SUPABASE_MODEL_PATH = os.getenv("SUPABASE_MODEL_PATH")
+
+                if not SUPABASE_BUCKET_NAME or not SUPABASE_MODEL_PATH:
+                    raise ValueError("SUPABASE_BUCKET_NAME i SUPABASE_MODEL_PATH muszą być ustawione")
+
+                # Pobierz plik z Supabase Storage
+                response = supabase.storage.from_(SUPABASE_BUCKET_NAME).download(SUPABASE_MODEL_PATH)
+
+                # Supabase storage download zwraca bytes
+                model_bytes = response
+
+                model = joblib.load(io.BytesIO(model_bytes))
+                st.write("✅ Model został pomyślnie załadowany z Supabase Storage!")
+                return model
+            else:
+                st.warning("⚠️ Zmiennie środowiskowe SUPABASE_URL lub SUPABASE_KEY nie są ustawione – pomijam ładowanie z Supabase.")
+
+        except Exception as supabase_error:
+            error_messages.append(f"Supabase Storage: {str(supabase_error)}")
+
+        # Fallback 2 – spróbuj załadować lokalny model
+        try:
+            #st.info("🔄 Próba załadowania lokalnego modelu...")
             local_model_path = 'models/maraton_pipeline.pkl'
             
             if os.path.exists(local_model_path):
                 model = joblib.load(local_model_path)
-                st.success("✅ Model został załadowany lokalnie!")
+                st.write("✅ Model został załadowany lokalnie!")
                 return model
             else:
-                st.error(f"❌ Nie znaleziono lokalnego pliku modelu: {local_model_path}")
-                return None
+                error_messages.append(f"Lokalny plik: nie znaleziono '{local_model_path}'")
                 
         except Exception as local_error:
-            st.error(f"❌ Błąd podczas ładowania lokalnego modelu: {str(local_error)}")
-            return None
+            error_messages.append(f"Lokalny odczyt: {str(local_error)}")
+
+    # Jeśli dotarliśmy tutaj, oznacza to, że żadna z metod się nie powiodła
+    st.error("❌ Nie udało się załadować modelu z żadnego źródła:\n" + "\n".join(error_messages))
+    return None
 
 # Zmiana czasu uzyskanego przez zawodników z formatu h:m:s, na sekundy
 def convert_time_to_seconds(time):
@@ -399,7 +438,8 @@ def generuj_motywujace_podsumowanie_ai(wiek, plec, czas_5km, przewidywany_czas, 
             max_tokens=250
         )
 
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        return content.strip() if content else ""
         
     except Exception as e:
         # Fallback - podstawowy tekst motywujący
@@ -484,7 +524,8 @@ def generuj_prosbe_o_brakujace_dane(brakujace_dane, dane_z_ai, imie=None):
             max_tokens=150
         )
 
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        return content.strip() if content else ""
         
     except Exception as e:
         # Fallback - podstawowa prośba
@@ -588,7 +629,12 @@ def log_to_langfuse(dane_uzytkownika, wyniki_predykcji, wskazowki, dane_dla_ai=N
 def main():
 
     # Tytuł i opis aplikacji
-    st.title("🏃‍♂️ Przewidywanie czasu półmaratonu")
+    col1, col2 = st.columns([1, 10])
+    with col1:
+        st.image("maraton.png", width=100)
+    with col2:
+        st.title("Półmaraton - predykcja czasu i statystyki")
+
     st.markdown("""
     ### Sprawdź swój czas półmaratonu na podstawie danych historycznych zawodników Półmaratonu Wrocławskiego 2023-2024
     """)
