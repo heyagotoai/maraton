@@ -16,7 +16,7 @@ pip install -r requirements.txt
 ## Uruchomienie
 
 ```bash
-streamlit run apptest.py
+streamlit run app.py
 ```
 
 ## Funkcjonalności
