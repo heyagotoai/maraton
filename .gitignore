@@ -11,3 +11,5 @@ appV4.py
 appV5.py
 docker-compose.yml
 Dockerfile
+
+s3.py

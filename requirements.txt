@@ -3,10 +3,10 @@ pandas>=1.5.0
 numpy>=1.21.0
 joblib>=1.1.0
 scikit-learn>=1.0.0
-pycaret
+pycaret==3.3.2
 boto3>=1.26.0
-catboost
+catboost==1.2.8
 openai>=1.3.0
 python-dotenv>=1.0.0
 langfuse>=2.0.0
-supabase
+supabase==2.0.0
